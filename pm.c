@@ -74,14 +74,16 @@ typedef struct pm_configuration {
         int max_retries;
         pm_process *process_list;
         pm_process *process_list_end;
-
-        sem_t dead_child;
+        pthread_mutex_t process_list_lock;
+        bool shutdown;
+        sem_t *dead_child;
 
 } pm_configuration;
 
 pm_configuration config = {
         .socket_file = NULL,
         .stdout_file = NULL,
+        .shutdown = false
 };
 
 void *malloc_nofail (size_t size)
@@ -115,6 +117,17 @@ int get_write_file_fd (char *filename)
 
         return fd;
 }
+
+void lock_process_list ()
+{
+        pthread_mutex_lock (&config.process_list_lock);
+}
+
+void unlock_process_list ()
+{
+        pthread_mutex_unlock (&config.process_list_lock);
+}
+
 
 int setup_unix_domain_server_socket (char *socket_file)
 {
@@ -203,6 +216,7 @@ void add_process (pid_t pid,
 
         argv[argc] = NULL;
 
+        lock_process_list ();
         if (!config.process_list_end) {
                 config.process_list = p;
                 config.process_list_end = p;
@@ -210,6 +224,7 @@ void add_process (pid_t pid,
                 config.process_list_end->next = p;
                 config.process_list_end = p;
         }
+        unlock_process_list ();
 }
 
 pid_t new_process (char *program,
@@ -233,7 +248,6 @@ pid_t new_process (char *program,
                 exit (EXIT_FAILURE);
         } else if (pid > 0) {
                 add_process (pid, program, argv, stdout_file, max_retries);
-
                 return pid;
         } else {
                 perror ("fork");
@@ -253,7 +267,7 @@ void set_stdout (char *stdout_file)
 
 void handle_child_signal (int signal)
 {
-        sem_post (&config.dead_child);
+        sem_post (config.dead_child);
 
         return;
 }
@@ -261,10 +275,9 @@ void handle_child_signal (int signal)
 void send_ok_response (int conn_fd)
 {
         pm_response response = { .code = OK };
-
-        if (write (conn_fd, &response, sizeof (pm_response)) !=
+        if (send (conn_fd, &response, sizeof (pm_response), MSG_NOSIGNAL) !=
             sizeof (pm_response)) {
-                perror ("write");
+                perror ("send");
                 exit (EXIT_FAILURE);
         }
 }
@@ -291,9 +304,10 @@ pm_process *find_process_with_pid (pid_t pid)
 {
         for (pm_process *curr = config.process_list; curr != NULL;
              curr = curr->next)
-                if (curr->pid == pid)
+                if (curr->pid == pid) {
+                        unlock_process_list ();
                         return curr;
-
+                }
         return NULL;
 }
 
@@ -332,10 +346,12 @@ void daemon_child_monitor_thread (void *arg)
         sigemptyset (&set);
         sigaddset (&set, SIGCHLD);
         pthread_sigmask (SIG_BLOCK, &set, NULL);
-
         while (1) {
+
                 // we spend most of our time sleeping on the sem wait.
-                sem_wait (&config.dead_child);
+                sem_wait (config.dead_child);
+                if (config.shutdown)
+                        pthread_exit(NULL);
 
                 int status;
                 pid_t pid;
@@ -351,11 +367,15 @@ void daemon_child_monitor_thread (void *arg)
                                         WTERMSIG (status));
                         }
 
+                        lock_process_list ();
+                        // do not allow thread to be killed while list is being
+                        // modified
                         pm_process *child = find_process_with_pid (pid);
 
                         if (!child) {
                                 printf ("erroneous SIGCHLD received. did not recognize child pid %d\n",
                                         pid);
+                                unlock_process_list ();
                                 continue;
                         }
 
@@ -364,22 +384,27 @@ void daemon_child_monitor_thread (void *arg)
                         if (child->max_retries > 0) {
                                 child->max_retries--;
 
-                                printf ("autorestart enabled (retries left: %d). attempting to restart child...\n",
-                                        child->max_retries);
+                                printf ("autorestart enabled (retries left: %d). attempting to restart child with old pid %d...\n",
+                                        child->max_retries,
+                                        pid);
 
                                 new_process (child->program_name,
                                              child->argv,
                                              child->stdout_file,
                                              child->max_retries);
                         }
+
                         remove_process_from_list (child);
+                        // unlock mutex before potential thread cancel request
+                        unlock_process_list ();
                 }
         }
 }
 
 pthread_t spawn_daemon_child_monitor_thread ()
 {
-        sem_init (&config.dead_child, 0, 0);
+        config.dead_child = sem_open ("dead_child", O_CREAT, 0600, 0);
+        pthread_mutex_init (&config.process_list_lock, NULL);
 
         pthread_t dead_child_thread;
 
@@ -400,16 +425,17 @@ void daemon_process (char *socket_file)
 {
         int sock_fd = setup_unix_domain_server_socket (socket_file);
 
+        fprintf (stdout, "pm daemon spawning child monitor thread...\n");
         pthread_t dead_child_monitor_thread =
                 spawn_daemon_child_monitor_thread ();
+
+        fprintf (stdout, "pm daemon initialized successfully!\n");
+        fprintf (stdout, "now listening for requests...\n");
 
         // daemon is entirely command based, it sits and waits for a command to
         // be written to the socket before doing anything.
         pm_cmd cmd;
         for (;;) {
-                fprintf (stdout, "pm daemon initialized successfully!\n");
-                fprintf (stdout, "now listening for requests...\n");
-
                 int conn_fd = accept (sock_fd, NULL, NULL);
 
                 read_nofail (conn_fd, &cmd, sizeof (pm_cmd));
@@ -480,8 +506,11 @@ void daemon_process (char *socket_file)
                         // disable the SIGCHLD handler
                         signal (SIGCHLD, SIG_IGN);
 
-                        // stop the monitoring thread
-                        pthread_cancel (dead_child_monitor_thread);
+                        printf ("stopping child monitor thread...\n");
+                        config.shutdown = true;
+                        sem_post(config.dead_child);
+                        pthread_join (dead_child_monitor_thread, NULL);
+                        printf ("child monitor thread is dead\n");
 
                         for (pm_process *proc = config.process_list;
                              proc != NULL;
@@ -528,7 +557,8 @@ void daemon_process (char *socket_file)
                                 child_count++;
                         }
 
-                        send_ok_response (conn_fd);
+                        printf ("closing connections...\n");
+                        fflush (stdout);
 
                         close (conn_fd);
                         close (sock_fd);
