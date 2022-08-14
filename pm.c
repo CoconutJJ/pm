@@ -20,11 +20,13 @@
 
 pm_configuration config = { .socket_file = NULL,
                             .stdout_file = NULL,
-                            .shutdown = false };
+                            .shutdown = false,
+                            .process_list = NULL,
+                            .process_list_end = NULL};
 
 int get_write_file_fd (char *filename)
 {
-        int fd = open (filename, O_CREAT | O_WRONLY);
+        int fd = open (filename, O_CREAT | O_WRONLY, 0666);
 
         if (fd < 0) {
                 perror ("open");
@@ -46,13 +48,15 @@ int setup_unix_domain_server_socket (char *socket_file)
         struct sockaddr_un addr = { 0 };
 
         addr.sun_family = AF_UNIX;
-        addr.sun_len = 0;
         strncpy (addr.sun_path, socket_file, 104);
 
         if (bind (sock_fd,
                   (struct sockaddr *)&addr,
                   sizeof (struct sockaddr_un)) < 0) {
                 perror ("bind");
+                log_error (
+                        DAEMON,
+                        "Make sure the socket file you specify does not already exist. Use --sockfile=...");
                 exit (EXIT_FAILURE);
         }
 
@@ -74,7 +78,6 @@ int setup_unix_domain_client_socket (char *socket_file)
         struct sockaddr_un addr = { 0 };
 
         addr.sun_family = AF_UNIX;
-        addr.sun_len = 0;
         strncpy (addr.sun_path, socket_file, 104);
 
         if (connect (sock_fd,
@@ -105,6 +108,7 @@ pid_t new_process (char *program,
                 execvp (program, argv);
 
                 perror ("execvp");
+                fprintf(stderr, "program: %s", program);
                 exit (EXIT_FAILURE);
         } else if (pid > 0) {
                 add_process (pid, program, argv, stdout_file, max_retries);
@@ -128,7 +132,7 @@ void set_stdout (char *stdout_file)
 void handle_child_signal (int signal)
 {
         sem_post (config.dead_child);
-        
+
         return;
 }
 
@@ -150,6 +154,53 @@ void process_daemon_command (char *command)
         }
 }
 
+void process_client_command (char *command, char **remaining_argv)
+{
+        int sock_fd = setup_unix_domain_client_socket (config.socket_file);
+        if (strcmp (command, "run") == 0) {
+                size_t buffer_size = 0;
+                for (int i = 0; remaining_argv[i] != NULL; i++) {
+                        buffer_size += strlen (remaining_argv[i]) + 1;
+                }
+
+                pm_cmd *cmd = malloc_nofail (sizeof (pm_cmd) + buffer_size);
+
+                cmd->instruction = NEW_PROCESS;
+                cmd->new_process.size = buffer_size;
+                
+                char *curr = *remaining_argv;
+                char *write_head = &(cmd->new_process.command[0]);
+                while (curr != NULL) {
+                        while (*curr != '\0') {
+                                *write_head = *curr;
+                                curr++;
+                                write_head++;
+                        }
+                        *write_head = *curr;
+                        write_head++;
+
+                        remaining_argv++;
+                        curr = *remaining_argv;
+                }
+
+                send (sock_fd, cmd, sizeof (pm_cmd) + buffer_size, MSG_NOSIGNAL);
+
+                close (sock_fd);
+        }
+}
+
+void print_usage_statement ()
+{
+        printf ("usage: pm target subcommand [--sockfile=]\n"
+                "target:\n"
+                "  daemon\n"
+                "  client\n"
+                "subcommand:\n"
+                "  daemon\n"
+                "    start - starts the pm daemon\n"
+                "    shutdown - shutdown the pm daemon\n");
+}
+
 void parse_cmd_args (int argc, char **argv)
 {
         struct option long_options[] = {
@@ -167,8 +218,32 @@ void parse_cmd_args (int argc, char **argv)
                 }
         }
 
-        if (strcmp (argv[optind++], "daemon") == 0)
-                process_daemon_command (argv[optind++]);
+        int i = 0;
+
+        while (optind < argc) {
+                switch (i) {
+                case 0:
+                        if (strcmp (argv[optind], "daemon") == 0)
+                                i++;
+                        else if (strcmp (argv[optind], "client") == 0)
+                                i = 2;
+                        else
+                                i = -1;
+
+                        break;
+                case 1: process_daemon_command (argv[optind]); return;
+                case 2: {
+                        process_client_command (argv[optind],
+                                                &argv[optind + 1]);
+                        return;
+                }
+                default: print_usage_statement (); return;
+                }
+
+                optind++;
+        }
+
+        print_usage_statement ();
 }
 
 int main (int argc, char **argv)

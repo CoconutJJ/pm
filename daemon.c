@@ -7,8 +7,17 @@
 #include <unistd.h>
 extern pm_configuration config;
 
+void handle_error(int sig) {
+
+        printf("Program recieved signal %d", sig);
+        exit(sig);
+
+}
+
 void daemon_process (char *socket_file)
 {
+        signal(SIGSEGV, handle_error);
+
         log_info (DAEMON, "pm daemon is starting...");
         int sock_fd = setup_unix_domain_server_socket (socket_file);
 
@@ -29,6 +38,8 @@ void daemon_process (char *socket_file)
 
                 switch (cmd.instruction) {
                 case NEW_PROCESS: {
+
+                        log_info(DAEMON, "Recieved NEW_PROCESS command...");
                         // setup process command line arguments
                         char *command = malloc_nofail (cmd.new_process.size);
 
@@ -47,7 +58,6 @@ void daemon_process (char *socket_file)
                         char *curr = command;
                         while (args > 0) {
                                 argv[j] = curr;
-
                                 while (*curr != '\0')
                                         curr++;
 
@@ -59,25 +69,31 @@ void daemon_process (char *socket_file)
                         argv[j] = NULL;
 
                         // spawn the new process
-                        new_process (argv[0],
-                                     &(argv[1]),
+                        pid_t pid = new_process (argv[0],
+                                     argv,
                                      config.stdout_file,
                                      config.max_retries);
 
+                        log_info(DAEMON, "New process with pid %d was added", pid);
+
                         free (argv);
                         free (command);
-
                         send_response (conn_fd, OK);
-
                         break;
                 }
                 case SIGNAL_PROCESS: {
                         lock_process_list ();
+                        log_info (DAEMON, "Received SIGNAL command");
 
                         pm_process *process =
                                 find_process_with_pid (cmd.signal_process.pid);
 
                         if (!process) {
+                                log_warn (DAEMON,
+                                          "Could not find process with pid %d",
+                                          cmd.signal_process.pid);
+                                unlock_process_list ();
+                                continue;
                         }
 
                         if (kill (process->pid, cmd.signal_process.signal) <
@@ -91,13 +107,10 @@ void daemon_process (char *socket_file)
                         break;
                 }
                 case LIST_PROCESS: {
-                        lock_process_list ();
-
-                        unlock_process_list ();
-
                         break;
                 }
                 case ENABLE_AUTORESTART: {
+                        config.max_retries = cmd.autorestart.max_retries;
                         break;
                 }
                 case DISABLE_AUTORESTART: {
@@ -123,7 +136,7 @@ void daemon_process (char *socket_file)
                              proc = proc->next) {
                                 log_info (
                                         DAEMON,
-                                        "Sending SIGINT to child with pid %d...\n",
+                                        "Sending SIGINT to child with pid %d...",
                                         proc->pid);
 
                                 // send SIGINT to child, this usually will do
@@ -146,7 +159,7 @@ void daemon_process (char *socket_file)
                                     !WIFEXITED (status)) {
                                         log_info (
                                                 DAEMON,
-                                                "Child (pid: %d) did not exit within 1 second of SIGINT. Sending SIGKILL...\n",
+                                                "Child (pid: %d) did not exit within 1 second of SIGINT. Sending SIGKILL...",
                                                 proc->pid);
 
                                         // if child doesn't die, forcibly kill
@@ -162,14 +175,14 @@ void daemon_process (char *socket_file)
                                 } else {
                                         log_info (
                                                 DAEMON,
-                                                "Child with pid %d was terminated.\n",
+                                                "Child with pid %d was terminated.",
                                                 proc->pid);
                                 }
 
                                 child_count++;
                         }
 
-                        log_info (DAEMON, "Closing connections...\n");
+                        log_info (DAEMON, "Closing connections...");
 
                         close (conn_fd);
                         close (sock_fd);
@@ -186,7 +199,7 @@ void spawn_daemon_process ()
         if (!config.socket_file) {
                 log_error (
                         MAIN,
-                        "no socket file specified. use --sockfile=... to specify socket file name\n");
+                        "no socket file specified. use --sockfile=... to specify socket file name");
                 exit (EXIT_FAILURE);
         }
 
@@ -194,12 +207,12 @@ void spawn_daemon_process ()
         if (pid == 0) {
                 daemon_process (config.socket_file);
                 unlink (config.socket_file);
-                log_info (DAEMON,"pm daemon shutdown successful!\n");
+                log_info (DAEMON, "pm daemon shutdown successful!");
                 exit (EXIT_SUCCESS);
         } else if (pid > 0) {
                 return;
         } else {
-                log_info (MAIN,"Unable to spawn daemon process");
+                log_info (MAIN, "Unable to spawn daemon process");
                 exit (EXIT_FAILURE);
         }
 }

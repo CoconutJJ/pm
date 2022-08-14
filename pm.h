@@ -41,6 +41,7 @@ typedef struct __attribute__ ((packed)) pm_cmd {
                 } signal_process;
 
                 struct {
+                        int max_retries;
                 } autorestart;
         };
 
@@ -88,7 +89,7 @@ pid_t new_process (char *program,
                    int max_retries);
 void set_stdout (char *stdout_file);
 void handle_child_signal (int signal);
-void send_response (int conn_fd, pm_code errno);
+void send_response (int conn_fd, pm_code err);
 void destroy_process (pm_process *process);
 pm_process *find_process_with_pid (pid_t pid);
 bool remove_process_from_list (pm_process *process);

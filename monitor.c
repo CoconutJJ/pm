@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 extern pm_configuration config;
 
@@ -16,9 +17,10 @@ void daemon_child_monitor_thread (void *arg)
         while (1) {
                 // we spend most of our time sleeping on the sem wait.
                 sem_wait (config.dead_child);
-                if (config.shutdown)
+                if (config.shutdown) {
+                        log_info(MONITOR, "monitor thread has exit per request");
                         pthread_exit (NULL);
-
+                }
                 int status;
                 pid_t pid;
                 while ((pid = waitpid (-1, &status, WNOHANG)) > 0) {
@@ -26,13 +28,13 @@ void daemon_child_monitor_thread (void *arg)
                         if (WIFEXITED (status)) {
                                 log_info (
                                         MONITOR,
-                                        "child with pid %d exited with status code %d\n",
+                                        "child with pid %d exited with status code %d",
                                         pid,
                                         WEXITSTATUS (status));
                         } else if (WIFSIGNALED (status)) {
                                 log_info (
                                         MONITOR,
-                                        "child with pid %d was killed by signal %d\n",
+                                        "child with pid %d was killed by signal %d",
                                         pid,
                                         WTERMSIG (status));
                         }
@@ -44,7 +46,7 @@ void daemon_child_monitor_thread (void *arg)
                         if (!child) {
                                 log_warn (
                                         MONITOR,
-                                        "erroneous SIGCHLD received. did not recognize child pid %d\n",
+                                        "erroneous SIGCHLD received. did not recognize child pid %d",
                                         pid);
                                 unlock_process_list ();
                                 continue;
@@ -57,7 +59,7 @@ void daemon_child_monitor_thread (void *arg)
 
                                 log_info (
                                         MONITOR,
-                                        "autorestart enabled (retries left: %d). attempting to restart child with old pid %d...\n",
+                                        "autorestart enabled (retries left: %d). attempting to restart child with old pid %d...",
                                         child->max_retries,
                                         pid);
 
@@ -68,7 +70,6 @@ void daemon_child_monitor_thread (void *arg)
                         }
 
                         remove_process_from_list (child);
-                        // unlock mutex before potential thread cancel request
                         unlock_process_list ();
                 }
         }

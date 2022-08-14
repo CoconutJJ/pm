@@ -1,7 +1,7 @@
 #include "pm.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 extern pm_configuration config;
 
 void lock_process_list ()
@@ -36,7 +36,6 @@ pm_process *find_process_with_pid (pid_t pid)
         for (pm_process *curr = config.process_list; curr != NULL;
              curr = curr->next)
                 if (curr->pid == pid) {
-                        unlock_process_list ();
                         return curr;
                 }
         return NULL;
@@ -45,7 +44,6 @@ pm_process *find_process_with_pid (pid_t pid)
 bool remove_process_from_list (pm_process *process)
 {
         pm_process *prev = NULL;
-
         for (pm_process *curr = config.process_list; curr != NULL;
              prev = curr, curr = curr->next) {
                 if (curr != process)
@@ -77,6 +75,10 @@ void add_process (pid_t pid,
                   int max_retries)
 {
         pm_process *p = malloc_nofail (sizeof (pm_process));
+        p->next = NULL;
+
+        p->pid = pid;
+        p->max_retries = max_retries;
 
         p->program_name = malloc_nofail (strlen (program) + 1);
         strcpy (p->program_name, program);
@@ -84,11 +86,9 @@ void add_process (pid_t pid,
         if (stdout_file) {
                 p->stdout_file = malloc_nofail (strlen (stdout_file) + 1);
                 strcpy (p->stdout_file, stdout_file);
+        } else {
+                p->stdout_file = NULL;
         }
-
-        p->pid = pid;
-        p->max_retries = max_retries;
-        p->next = NULL;
 
         int argc = 0;
 
@@ -98,13 +98,14 @@ void add_process (pid_t pid,
         p->argv = malloc_nofail ((argc + 1) * sizeof (char *));
 
         for (int i = 0; i < argc; i++) {
-                p->argv[i] = malloc (strlen (argv[i]) + 1);
+                p->argv[i] = malloc_nofail (strlen (argv[i]) + 1);
                 strcpy (p->argv[i], argv[i]);
         }
 
-        argv[argc] = NULL;
+        p->argv[argc] = NULL;
 
         lock_process_list ();
+
         if (!config.process_list_end) {
                 config.process_list = p;
                 config.process_list_end = p;

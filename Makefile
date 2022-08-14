@@ -1,5 +1,5 @@
-CC=cc
-FLAGS=-Wall -O3
+CC=gcc
+FLAGS=-Wall -O3 -g -lpthread
 
 all: pm
 
