@@ -1,32 +1,45 @@
 #include "pm.h"
+#include <errno.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 extern pm_configuration config;
+extern pm_identity process_identity;
 
-void handle_error(int sig) {
+void handle_error (int sig)
+{
+        printf ("Program recieved signal %d", sig);
+        exit (sig);
+}
 
-        printf("Program recieved signal %d", sig);
-        exit(sig);
+bool is_dead_child (pid_t pid)
+{
+        int status;
 
+        if (waitpid (pid, &status, WNOHANG) == -1) {
+                log_error ("Failed to wait on child: %s", strerror (errno));
+                return false;
+        }
+
+        return WIFEXITED (status) || WIFSIGNALED (status);
 }
 
 void daemon_process (char *socket_file)
 {
-        signal(SIGSEGV, handle_error);
+        signal (SIGSEGV, handle_error);
 
-        log_info (DAEMON, "pm daemon is starting...");
+        log_info ("pm daemon is starting...");
         int sock_fd = setup_unix_domain_server_socket (socket_file);
 
-        log_info (DAEMON, "pm daemon spawning child monitor thread...");
-        pthread_t dead_child_monitor_thread =
-                spawn_daemon_child_monitor_thread ();
+        log_info ("pm daemon spawning child monitor thread...");
+        pthread_t dead_child_monitor_thread = spawn_daemon_child_monitor_thread ();
 
-        log_info (DAEMON, "pm daemon initialized successfully!");
-        log_info (DAEMON, "now listening for requests...");
+        log_info ("pm daemon initialized successfully!");
+        log_info ("now listening for requests...");
 
         // daemon is entirely command based, it sits and waits for a command to
         // be written to the socket before doing anything.
@@ -38,8 +51,7 @@ void daemon_process (char *socket_file)
 
                 switch (cmd.instruction) {
                 case NEW_PROCESS: {
-
-                        log_info(DAEMON, "Recieved NEW_PROCESS command...");
+                        log_info ("Recieved NEW_PROCESS command...");
                         // setup process command line arguments
                         char *command = malloc_nofail (cmd.new_process.size);
 
@@ -51,8 +63,7 @@ void daemon_process (char *socket_file)
                                 if (!command[i])
                                         args++;
 
-                        char **argv =
-                                malloc_nofail ((args + 1) * sizeof (char *));
+                        char **argv = malloc_nofail ((args + 1) * sizeof (char *));
 
                         int j = 0;
                         char *curr = command;
@@ -69,12 +80,13 @@ void daemon_process (char *socket_file)
                         argv[j] = NULL;
 
                         // spawn the new process
-                        pid_t pid = new_process (argv[0],
-                                     argv,
-                                     config.stdout_file,
-                                     config.max_retries);
+                        pid_t pid = new_process (argv[0], argv, config.stdout_file, config.max_retries);
 
-                        log_info(DAEMON, "New process with pid %d was added", pid);
+                        for (int i = 0; i < cmd.new_process.size - 1; i++)
+                                if (!command[i])
+                                        command[i] = ' ';
+
+                        log_info ("New process with pid %d was added: %s", pid, command);
 
                         free (argv);
                         free (command);
@@ -83,21 +95,17 @@ void daemon_process (char *socket_file)
                 }
                 case SIGNAL_PROCESS: {
                         lock_process_list ();
-                        log_info (DAEMON, "Received SIGNAL command");
+                        log_info ("Received SIGNAL command");
 
-                        pm_process *process =
-                                find_process_with_pid (cmd.signal_process.pid);
+                        pm_process *process = find_process_with_pid (cmd.signal_process.pid);
 
                         if (!process) {
-                                log_warn (DAEMON,
-                                          "Could not find process with pid %d",
-                                          cmd.signal_process.pid);
+                                log_warn ("Could not find process with pid %d", cmd.signal_process.pid);
                                 unlock_process_list ();
                                 continue;
                         }
 
-                        if (kill (process->pid, cmd.signal_process.signal) <
-                            0) {
+                        if (kill (process->pid, cmd.signal_process.signal) < 0) {
                                 perror ("kill");
                                 exit (EXIT_FAILURE);
                         }
@@ -107,82 +115,40 @@ void daemon_process (char *socket_file)
                         break;
                 }
                 case LIST_PROCESS: {
+                        lock_process_list ();
+
+                        unlock_process_list ();
+
                         break;
                 }
-                case ENABLE_AUTORESTART: {
+                case SET_AUTORESTART_TRIES: {
                         config.max_retries = cmd.autorestart.max_retries;
-                        break;
-                }
-                case DISABLE_AUTORESTART: {
-                        break;
                 }
                 case SHUTDOWN: {
-                        log_info (
-                                DAEMON,
-                                "User issued SHUTDOWN command. Shutting down pm daemon...");
-                        int child_count = 0;
+                        log_info ("User issued SHUTDOWN command. Shutting down pm daemon...");
 
-                        // close connection and socket. this lets client know
-                        // that we are shutting down.
-
-                        // disable the SIGCHLD handler
-                        signal (SIGCHLD, SIG_IGN);
-
-                        log_info (DAEMON, "Stopping monitor thread...");
+                        log_info ("Stopping monitor thread...");
                         stop_child_monitor_thread (dead_child_monitor_thread);
 
-                        for (pm_process *proc = config.process_list;
-                             proc != NULL;
-                             proc = proc->next) {
-                                log_info (
-                                        DAEMON,
-                                        "Sending SIGINT to child with pid %d...",
-                                        proc->pid);
+                        for (pm_process *proc = config.process_list; proc != NULL; proc = proc->next) {
+                                log_info ("Sending SIGTERM (15) to child with pid %d...", proc->pid);
 
-                                // send SIGINT to child, this usually will do
-                                // the trick
-                                kill (proc->pid, SIGINT);
+                                kill (proc->pid, SIGTERM);
+                        }
 
-                                // sleep for 1 second, wait for child to die.
-                                sleep (1);
+                        signal (SIGCHLD, SIG_IGN);
 
-                                int status = 0;
-
-                                // child should be dead by now
-                                if (waitpid (proc->pid, &status, WNOHANG) ==
-                                    -1) {
-                                        perror ("waitpid");
-                                        exit (EXIT_FAILURE);
-                                }
-
-                                if (!WIFSIGNALED (status) &&
-                                    !WIFEXITED (status)) {
+                        for (pm_process *proc = config.process_list; proc != NULL; proc = proc->next) {
+                                if (!is_dead_child (proc->pid)) {
                                         log_info (
-                                                DAEMON,
                                                 "Child (pid: %d) did not exit within 1 second of SIGINT. Sending SIGKILL...",
                                                 proc->pid);
 
-                                        // if child doesn't die, forcibly kill
-                                        // it.
                                         kill (proc->pid, SIGKILL);
-
-                                        if (waitpid (proc->pid, NULL, 0) ==
-                                            -1) {
-                                                perror ("waitpid");
-                                                exit (EXIT_FAILURE);
-                                        }
-
-                                } else {
-                                        log_info (
-                                                DAEMON,
-                                                "Child with pid %d was terminated.",
-                                                proc->pid);
                                 }
-
-                                child_count++;
                         }
 
-                        log_info (DAEMON, "Closing connections...");
+                        log_info ("Closing connections...");
 
                         close (conn_fd);
                         close (sock_fd);
@@ -197,22 +163,21 @@ void daemon_process (char *socket_file)
 void spawn_daemon_process ()
 {
         if (!config.socket_file) {
-                log_error (
-                        MAIN,
-                        "no socket file specified. use --sockfile=... to specify socket file name");
+                log_error ("no socket file specified. use --sockfile=... to specify socket file name");
                 exit (EXIT_FAILURE);
         }
 
         pid_t pid = fork ();
         if (pid == 0) {
+                process_identity = DAEMON;
                 daemon_process (config.socket_file);
                 unlink (config.socket_file);
-                log_info (DAEMON, "pm daemon shutdown successful!");
+                log_info ("pm daemon shutdown successful!");
                 exit (EXIT_SUCCESS);
         } else if (pid > 0) {
                 return;
         } else {
-                log_info (MAIN, "Unable to spawn daemon process");
+                log_info ("Unable to spawn daemon process");
                 exit (EXIT_FAILURE);
         }
 }

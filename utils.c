@@ -28,11 +28,8 @@ void read_nofail (int fd, void *buf, size_t size)
 void send_response (int conn_fd, pm_code err)
 {
         pm_response response = { .code = err };
-        if (send (conn_fd, &response, sizeof (pm_response), MSG_NOSIGNAL) !=
-            sizeof (pm_response)) {
-                
-                log_warn (
-                        DAEMON,
-                        "error occurred when sending response back to client: %s", strerror(errno));
+
+        if (send (conn_fd, &response, sizeof (pm_response), MSG_NOSIGNAL) != sizeof (pm_response)) {
+                log_warn ("error occurred when sending response back to client: %s", strerror (errno));
         }
 }

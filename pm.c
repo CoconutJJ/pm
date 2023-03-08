@@ -5,6 +5,7 @@
  */
 
 #include "pm.h"
+#include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <pthread.h>
@@ -18,11 +19,23 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#define DAEMON_SOCKET_FILENAME "daemon.sock"
+
+extern pm_identity process_identity;
+
 pm_configuration config = { .socket_file = NULL,
                             .stdout_file = NULL,
                             .shutdown = false,
                             .process_list = NULL,
-                            .process_list_end = NULL};
+                            .process_list_end = NULL };
+
+void fatal_error ()
+{
+        if (config.socket_file)
+                unlink (config.socket_file);
+
+        exit (EXIT_FAILURE);
+}
 
 int get_write_file_fd (char *filename)
 {
@@ -50,19 +63,16 @@ int setup_unix_domain_server_socket (char *socket_file)
         addr.sun_family = AF_UNIX;
         strncpy (addr.sun_path, socket_file, 104);
 
-        if (bind (sock_fd,
-                  (struct sockaddr *)&addr,
-                  sizeof (struct sockaddr_un)) < 0) {
-                perror ("bind");
-                log_error (
-                        DAEMON,
-                        "Make sure the socket file you specify does not already exist. Use --sockfile=...");
-                exit (EXIT_FAILURE);
+        if (bind (sock_fd, (struct sockaddr *)&addr, sizeof (struct sockaddr_un)) < 0) {
+                log_error ("Error binding to socket: %s", strerror (errno));
+                log_error ("Make sure the socket file you specify does not already exist. Use --sockfile=... to specify socket file name");
+
+                fatal_error ();
         }
 
         if (listen (sock_fd, 1) < 0) {
                 perror ("listen");
-                exit (EXIT_FAILURE);
+                fatal_error ();
         }
 
         config.socket_file = malloc_nofail (strlen (socket_file) + 1);
@@ -80,43 +90,13 @@ int setup_unix_domain_client_socket (char *socket_file)
         addr.sun_family = AF_UNIX;
         strncpy (addr.sun_path, socket_file, 104);
 
-        if (connect (sock_fd,
-                     (struct sockaddr *)&addr,
-                     sizeof (struct sockaddr_un)) != 0) {
+        if (connect (sock_fd, (struct sockaddr *)&addr, sizeof (struct sockaddr_un)) != 0) {
                 perror ("connect");
-                exit (EXIT_FAILURE);
+                log_error ("Is the daemon running? Use pm daemon start --sockfile=... to start the daemon.");
+                fatal_error ();
         }
 
         return sock_fd;
-}
-
-pid_t new_process (char *program,
-                   char **argv,
-                   char *stdout_file,
-                   int max_retries)
-{
-        pid_t pid = fork ();
-
-        if (pid == 0) {
-                // redirect stdout if user specified another location.
-                if (stdout_file) {
-                        int fd = get_write_file_fd (stdout_file);
-                        dup2 (fd, STDOUT_FILENO);
-                        close (fd);
-                }
-
-                execvp (program, argv);
-
-                perror ("execvp");
-                fprintf(stderr, "program: %s", program);
-                exit (EXIT_FAILURE);
-        } else if (pid > 0) {
-                add_process (pid, program, argv, stdout_file, max_retries);
-                return pid;
-        } else {
-                perror ("fork");
-                exit (EXIT_FAILURE);
-        }
 }
 
 void set_stdout (char *stdout_file)
@@ -142,15 +122,43 @@ void process_daemon_command (char *command)
                 spawn_daemon_process ();
                 exit (EXIT_SUCCESS);
         } else if (strcmp (command, "shutdown") == 0) {
-                int sock_fd =
-                        setup_unix_domain_client_socket (config.socket_file);
+                int sock_fd = setup_unix_domain_client_socket (config.socket_file);
 
                 pm_cmd cmd;
                 cmd.instruction = SHUTDOWN;
-
-                write (sock_fd, &cmd, sizeof (pm_cmd));
-
+                send (sock_fd, &cmd, sizeof (pm_cmd), MSG_NOSIGNAL);
                 close (sock_fd);
+        }
+}
+
+pm_code send_client_command (int sock_fd, pm_cmd *command)
+{
+        pm_code response;
+
+        switch (command->instruction) {
+        case NEW_PROCESS: send (sock_fd, command, sizeof (pm_cmd) + command->new_process.size, MSG_NOSIGNAL); break;
+
+        default: break;
+        }
+
+        if (recv (sock_fd, &response, sizeof (pm_code), 0) != sizeof (pm_code)) {
+                log_error ("");
+        }
+}
+
+void join_string_list_with_null_term (char **list, char *joined)
+{
+        size_t total_buffer_size = 0;
+        for (size_t i = 0; list[i] != NULL; i++) {
+                total_buffer_size += strlen (list[i]) + 1;
+        }
+
+        char *write_head = joined;
+        for (size_t i = 0; list[i] != NULL; i++) {
+                strcpy (write_head, list[i]);
+                write_head += strlen (list[i]);
+                *write_head = '\0';
+                write_head++;
         }
 }
 
@@ -159,6 +167,7 @@ void process_client_command (char *command, char **remaining_argv)
         int sock_fd = setup_unix_domain_client_socket (config.socket_file);
         if (strcmp (command, "run") == 0) {
                 size_t buffer_size = 0;
+
                 for (int i = 0; remaining_argv[i] != NULL; i++) {
                         buffer_size += strlen (remaining_argv[i]) + 1;
                 }
@@ -167,86 +176,92 @@ void process_client_command (char *command, char **remaining_argv)
 
                 cmd->instruction = NEW_PROCESS;
                 cmd->new_process.size = buffer_size;
-                
-                char *curr = *remaining_argv;
-                char *write_head = &(cmd->new_process.command[0]);
-                while (curr != NULL) {
-                        while (*curr != '\0') {
-                                *write_head = *curr;
-                                curr++;
-                                write_head++;
+
+                join_string_list_with_null_term (remaining_argv, cmd->new_process.command);
+
+                send_client_command (sock_fd, cmd);
+
+        } else if (strcmp (command, "autorestart") == 0) {
+                pm_cmd cmd = (pm_cmd) {
+                        .instruction = SET_AUTORESTART_TRIES,
+                        .autorestart = {
+                                .max_retries = 3,
                         }
-                        *write_head = *curr;
-                        write_head++;
+                };
 
-                        remaining_argv++;
-                        curr = *remaining_argv;
-                }
+                send_client_command (sock_fd, &cmd);
 
-                send (sock_fd, cmd, sizeof (pm_cmd) + buffer_size, MSG_NOSIGNAL);
-
-                close (sock_fd);
+        } else {
+                print_usage_statement ();
+                exit (EXIT_FAILURE);
         }
+
+        close (sock_fd);
 }
 
 void print_usage_statement ()
 {
-        printf ("usage: pm target subcommand [--sockfile=]\n"
+        printf ("usage: pm target subcommand --sockfile=sockfilename\n"
                 "target:\n"
                 "  daemon\n"
                 "  client\n"
                 "subcommand:\n"
                 "  daemon\n"
                 "    start - starts the pm daemon\n"
-                "    shutdown - shutdown the pm daemon\n");
+                "    shutdown - shutdown the pm daemon\n"
+                "\n"
+                "sockfilename: name of the UNIX socket file\n");
+}
+
+bool consume_argv (int argc, char **argv, int *opt_index, char *expected)
+{
+        if (*opt_index >= argc) {
+                return false;
+        }
+
+        if (strcmp (argv[*opt_index], expected) == 0) {
+                (*opt_index)++;
+                return true;
+        } else {
+                return false;
+        }
 }
 
 void parse_cmd_args (int argc, char **argv)
 {
         struct option long_options[] = {
-                {.name = "sockfile",
-                 .has_arg = required_argument,
-                 .flag = NULL,
-                 .val = 's'}
+                {.name = "sockfile", .has_arg = required_argument, .flag = NULL, .val = 's'}
         };
         int option_index = 0, c;
-        while ((c = getopt_long (
-                        argc, argv, "s:", long_options, &option_index)) != -1) {
+        while ((c = getopt_long (argc, argv, "s:", long_options, &option_index)) != -1) {
                 switch (c) {
                 case 's': config.socket_file = optarg; break;
                 default: break;
                 }
         }
 
-        int i = 0;
-
-        while (optind < argc) {
-                switch (i) {
-                case 0:
-                        if (strcmp (argv[optind], "daemon") == 0)
-                                i++;
-                        else if (strcmp (argv[optind], "client") == 0)
-                                i = 2;
-                        else
-                                i = -1;
-
-                        break;
-                case 1: process_daemon_command (argv[optind]); return;
-                case 2: {
-                        process_client_command (argv[optind],
-                                                &argv[optind + 1]);
-                        return;
-                }
-                default: print_usage_statement (); return;
-                }
-
-                optind++;
+        if (!config.socket_file) {
+                log_info ("No socket file name was specified, using default name: %s", DAEMON_SOCKET_FILENAME);
+                config.socket_file = DAEMON_SOCKET_FILENAME;
         }
 
-        print_usage_statement ();
+        if (consume_argv (argc, argv, &optind, "daemon")) {
+                process_daemon_command (argv[optind]);
+        } else if (consume_argv (argc, argv, &optind, "client")) {
+                if (!argv[optind]) {
+                        log_error ("client target requires subcommand");
+                        print_usage_statement ();
+                        return;
+                }
+
+                process_client_command (argv[optind], &argv[optind + 1]);
+        } else {
+                print_usage_statement ();
+        }
 }
 
 int main (int argc, char **argv)
 {
+        process_identity = MAIN;
         parse_cmd_args (argc, argv);
 }

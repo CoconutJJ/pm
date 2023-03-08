@@ -11,8 +11,7 @@ typedef enum pm_instruction {
         NEW_PROCESS,
         SIGNAL_PROCESS,
         LIST_PROCESS,
-        ENABLE_AUTORESTART,
-        DISABLE_AUTORESTART,
+        SET_AUTORESTART_TRIES,
         SET_STDOUT,
         SET_STDERR,
         SHUTDOWN
@@ -90,7 +89,7 @@ pid_t new_process (char *program,
 void set_stdout (char *stdout_file);
 void handle_child_signal (int signal);
 void send_response (int conn_fd, pm_code err);
-void destroy_process (pm_process *process);
+void free_process_list_entry (pm_process *process);
 pm_process *find_process_with_pid (pid_t pid);
 bool remove_process_from_list (pm_process *process);
 void daemon_child_monitor_thread (void *arg);
@@ -100,15 +99,16 @@ void daemon_process (char *socket_file);
 void spawn_daemon_process ();
 void process_daemon_command (char *command);
 
-void add_process (pid_t pid,
+void add_process_to_list (pid_t pid,
                   char *program,
                   char **argv,
                   char *stdout_file,
                   int max_retries);
 
 char *get_identity_name (pm_identity id);
-void log_info (pm_identity id, char *message, ...);
-void log_warn (pm_identity id, char *message, ...);
-void log_error (pm_identity id, char *message, ...);
-
+void log_info (char *message, ...);
+void log_warn (char *message, ...);
+void log_error (char *message, ...);
+void print_usage_statement ();
+void fatal_error ();
 #endif

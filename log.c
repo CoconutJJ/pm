@@ -3,6 +3,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+pm_identity process_identity;
+
 char *get_identity_name (pm_identity id)
 {
         switch (id) {
@@ -13,35 +15,35 @@ char *get_identity_name (pm_identity id)
         }
 }
 
-void log_info (pm_identity id, char *message, ...)
+void log_info (char *message, ...)
 {
         va_list args;
         va_start (args, message);
 
-        fprintf (stderr, "[INFO: %s] ", get_identity_name (id));
+        fprintf (stderr, "[INFO: %s] ", get_identity_name (process_identity));
         vfprintf (stderr, message, args);
         putchar ('\n');
         va_end (args);
 }
 
-void log_warn (pm_identity id, char *message, ...)
+void log_warn (char *message, ...)
 {
         va_list args;
         va_start (args, message);
 
-        fprintf (stderr, "[WARN: %s] ", get_identity_name (id));
+        fprintf (stderr, "[WARN: %s] ", get_identity_name (process_identity));
         vfprintf (stderr, message, args);
         putchar ('\n');
 
         va_end (args);
 }
 
-void log_error (pm_identity id, char *message, ...)
+void log_error (char *message, ...)
 {
         va_list args;
         va_start (args, message);
 
-        fprintf (stderr, "[ERR: %s] ", get_identity_name (id));
+        fprintf (stderr, "[ERR: %s] ", get_identity_name (process_identity));
         vfprintf (stderr, message, args);
         putchar ('\n');
 

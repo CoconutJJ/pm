@@ -1,9 +1,9 @@
 #include "pm.h"
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <fcntl.h>
 
 extern pm_configuration config;
 
@@ -18,7 +18,7 @@ void daemon_child_monitor_thread (void *arg)
                 // we spend most of our time sleeping on the sem wait.
                 sem_wait (config.dead_child);
                 if (config.shutdown) {
-                        log_info(MONITOR, "monitor thread has exit per request");
+                        log_info ("monitor thread has exit per request");
                         pthread_exit (NULL);
                 }
                 int status;
@@ -26,17 +26,9 @@ void daemon_child_monitor_thread (void *arg)
                 while ((pid = waitpid (-1, &status, WNOHANG)) > 0) {
                         // determine how child died
                         if (WIFEXITED (status)) {
-                                log_info (
-                                        MONITOR,
-                                        "child with pid %d exited with status code %d",
-                                        pid,
-                                        WEXITSTATUS (status));
+                                log_info ("child with pid %d exited with status code %d", pid, WEXITSTATUS (status));
                         } else if (WIFSIGNALED (status)) {
-                                log_info (
-                                        MONITOR,
-                                        "child with pid %d was killed by signal %d",
-                                        pid,
-                                        WTERMSIG (status));
+                                log_info ("child with pid %d was killed by signal %d", pid, WTERMSIG (status));
                         }
 
                         lock_process_list ();
@@ -44,10 +36,7 @@ void daemon_child_monitor_thread (void *arg)
                         pm_process *child = find_process_with_pid (pid);
 
                         if (!child) {
-                                log_warn (
-                                        MONITOR,
-                                        "erroneous SIGCHLD received. did not recognize child pid %d",
-                                        pid);
+                                log_warn ("erroneous SIGCHLD received. did not recognize child pid %d", pid);
                                 unlock_process_list ();
                                 continue;
                         }
@@ -58,15 +47,11 @@ void daemon_child_monitor_thread (void *arg)
                                 child->max_retries--;
 
                                 log_info (
-                                        MONITOR,
                                         "autorestart enabled (retries left: %d). attempting to restart child with old pid %d...",
                                         child->max_retries,
                                         pid);
 
-                                new_process (child->program_name,
-                                             child->argv,
-                                             child->stdout_file,
-                                             child->max_retries);
+                                new_process (child->program_name, child->argv, child->stdout_file, child->max_retries);
                         }
 
                         remove_process_from_list (child);
@@ -82,10 +67,7 @@ pthread_t spawn_daemon_child_monitor_thread ()
 
         pthread_t dead_child_thread;
 
-        if (pthread_create (&dead_child_thread,
-                            NULL,
-                            &daemon_child_monitor_thread,
-                            NULL) != 0) {
+        if (pthread_create (&dead_child_thread, NULL, &daemon_child_monitor_thread, NULL) != 0) {
                 perror ("pthread_create");
                 exit (EXIT_FAILURE);
         }

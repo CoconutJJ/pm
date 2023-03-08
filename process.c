@@ -13,7 +13,33 @@ void unlock_process_list ()
 {
         pthread_mutex_unlock (&config.process_list_lock);
 }
-void destroy_process (pm_process *process)
+
+pid_t new_process (char *program, char **argv, char *stdout_file, int max_retries)
+{
+        pid_t pid = fork ();
+
+        if (pid == 0) {
+                // redirect stdout if user specified another location.
+                if (stdout_file) {
+                        int fd = get_write_file_fd (stdout_file);
+                        dup2 (fd, STDOUT_FILENO);
+                        close (fd);
+                }
+
+                execvp (program, argv);
+
+                perror ("execvp");
+                fatal_error ();
+        } else if (pid > 0) {
+                add_process_to_list (pid, program, argv, stdout_file, max_retries);
+                return pid;
+        } else {
+                perror ("fork");
+                fatal_error ();
+        }
+}
+
+void free_process_list_entry (pm_process *process)
 {
         if (process->program_name)
                 free (process->program_name);
@@ -33,8 +59,7 @@ void destroy_process (pm_process *process)
 
 pm_process *find_process_with_pid (pid_t pid)
 {
-        for (pm_process *curr = config.process_list; curr != NULL;
-             curr = curr->next)
+        for (pm_process *curr = config.process_list; curr != NULL; curr = curr->next)
                 if (curr->pid == pid) {
                         return curr;
                 }
@@ -44,35 +69,29 @@ pm_process *find_process_with_pid (pid_t pid)
 bool remove_process_from_list (pm_process *process)
 {
         pm_process *prev = NULL;
-        for (pm_process *curr = config.process_list; curr != NULL;
-             prev = curr, curr = curr->next) {
-                if (curr != process)
-                        continue;
+        pm_process *curr = config.process_list;
 
-                if (config.process_list == curr) {
-                        config.process_list = curr->next;
-                }
+        for (; curr != NULL || curr != process; prev = curr, curr = curr->next)
+                ;
 
-                if (config.process_list_end == curr) {
-                        config.process_list_end = prev;
-                }
+        if (!curr)
+                return false;
 
-                if (prev) {
-                        prev->next = curr->next;
-                }
+        if (config.process_list == curr)
+                config.process_list = curr->next;
 
-                destroy_process (curr);
+        if (config.process_list_end == curr)
+                config.process_list_end = prev;
 
-                return true;
-        }
+        if (prev)
+                prev->next = curr->next;
+
+        free_process_list_entry (curr);
+
         return false;
 }
 
-void add_process (pid_t pid,
-                  char *program,
-                  char **argv,
-                  char *stdout_file,
-                  int max_retries)
+void add_process_to_list (pid_t pid, char *program, char **argv, char *stdout_file, int max_retries)
 {
         pm_process *p = malloc_nofail (sizeof (pm_process));
         p->next = NULL;
